@@ -24,4 +24,5 @@ cc_library {
         "libboot_control_qti.cpp",
     ],
     export_include_dirs: ["."],
+    export_shared_lib_headers: ["android.hardware.boot@1.1"],
 }

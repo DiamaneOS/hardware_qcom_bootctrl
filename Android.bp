@@ -1,0 +1,28 @@
+// Copyright 2026 The DiamaneOS Project
+// SPDX-License-Identifier: Apache-2.0
+package {
+    default_applicable_licenses: ["diamaneos_qcom_bootctrl_license"],
+}
+
+license {
+    name: "diamaneos_qcom_bootctrl_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+        "SPDX-license-identifier-BSD-3-Clause",
+        "SPDX-license-identifier-BSD-3-Clause-Clear",
+    ],
+    license_text: [
+        "NOTICE",
+        "LICENSES/Apache-2.0.txt",
+        "LICENSES/BSD-3-Clause-Clear.txt",
+        "aidl/*.cpp",
+        "aidl/*.h",
+        "1.1/libboot_control_qti/*.cpp",
+        "1.1/libboot_control_qti/*.h",
+        "1.1/impl/*.cpp",
+        "1.1/impl/*.h",
+        "1.2/impl/*.cpp",
+        "1.2/impl/*.h",
+    ],
+}
