@@ -20,6 +20,5 @@ DiamaneOS changes are the commits on top.
 
 ## Upstream and licensing
 
-Upstream history, copyright headers and NOTICE are retained. Individual files
-carry their applicable Linux Foundation, Apache-2.0 and BSD-3-Clause-Clear
-terms; these build adaptations do not relicense upstream code.
+Upstream copyright headers and `NOTICE` are kept. Licence texts are in
+`LICENSES/`.
