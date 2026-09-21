@@ -17,3 +17,9 @@ evidence, not verification of device slot switching, recovery or updates.
 Upstream history, copyright headers and NOTICE are retained. Individual files
 carry their applicable Linux Foundation, Apache-2.0 and BSD-3-Clause-Clear
 terms; these build adaptations do not relicense upstream code.
+
+The root `Android.mk.legacy` is retained for source history but not evaluated.
+It defined the old `bootctrl.<platform>` modules against the legacy updater
+library whenever A/B updates were enabled. The product uses the source AIDL
+services and their versioned implementation libraries instead. GPT/UFS support
+remains in the recovery-support project.
