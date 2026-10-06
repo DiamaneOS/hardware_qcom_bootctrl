@@ -29,7 +29,13 @@ using aidl::android::hardware::boot::BootControl;
 using aidl::android::hardware::boot::IBootControl;
 
 int main(int, char* argv[]) {
+#ifdef BOOTCTL_LOG_TO_LOGD
+    // The vendor service runs as its own user, which cannot open the root-only
+    // /dev/kmsg; recovery has no logd and keeps the kernel log.
+    android::base::InitLogging(argv, android::base::LogdLogger());
+#else
     android::base::InitLogging(argv, android::base::KernelLogger);
+#endif
     ABinderProcess_setThreadPoolMaxThreadCount(0);
     std::shared_ptr<IBootControl> service = ndk::SharedRefBase::make<BootControl>();
 
