@@ -1,7 +1,12 @@
 # Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
+# Runs as its own user (aidl/config.fs) with one capability: CAP_SYS_RAWIO,
+# which the kernel requires for the UFS BSG ioctl that switches the boot LUN.
+# The product gives the vendor_bootctl group the nodes it opens (the GPT disks
+# of the A/B partitions, misc and the UFS BSG node).
 service vendor.boot-qti /vendor/bin/hw/android.hardware.boot-service.qti
     class early_hal
-    user root
-    group root
+    user vendor_bootctl
+    group vendor_bootctl
+    capabilities SYS_RAWIO
