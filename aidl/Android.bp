@@ -54,6 +54,7 @@ cc_binary {
     name: "android.hardware.boot-service.qti",
     defaults: ["android.hardware.boot-service.qti.common"],
     init_rc: ["android.hardware.boot-service.qti.rc"],
+    cflags: ["-DBOOTCTL_LOG_TO_LOGD"],
     vendor: true,
 }
 

@@ -17,6 +17,14 @@ DiamaneOS changes are the commits on top.
 
 ## Privileges
 
+- The vendor service runs as `vendor_bootctl` (`aidl/config.fs`) with
+  CAP_SYS_RAWIO only, for the UFS BSG ioctl that switches the boot LUN.
+- It logs to logd, since `/dev/kmsg` is root-only.
+- The product adds `aidl/config.fs` to `TARGET_FS_CONFIG_GEN`.
+- The product gives the `vendor_bootctl` group read-write access (ueventd) to the GPT
+    disks holding A/B partitions, the misc partition and `/dev/ufs-bsg*`.
+- The recovery variant keeps root and the kernel log: recovery runs without
+  the vendor passwd file and without logd.
 
 ## Upstream and licensing
 
