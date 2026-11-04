@@ -533,9 +533,20 @@ error:
 	return -1;
 }
 
+// Sets every disk back to @slot after a failed switch, as far as it can.
+static void restore_active_slot(map<string, vector<string>> &ptn_map, unsigned slot)
+{
+	for (auto &entry : ptn_map) {
+		if (entry.second.size() < 1)
+			continue;
+		if (boot_ctl_set_active_slot_for_partitions(entry.second, slot))
+			ALOGE("%s: Failed to restore slot %u on %s", __func__, slot,
+					entry.first.c_str());
+	}
+}
+
 int set_active_boot_slot(unsigned slot)
 {
-	unsigned original_slot = get_current_slot();
 	if (mGvmqPlatform) {
 		std::string err;
 		std::string misc_blk_device = get_bootloader_message_blk_device(&err);
@@ -578,8 +589,11 @@ int set_active_boot_slot(unsigned slot)
 	int rc = -1;
 	int is_ufs = gpt_utils_is_ufs_device();
 	map<string, vector<string>>::iterator map_iter;
+	// Not the booted slot: a pending update can already have moved the active
+	// slot, and a failed switch has to put back what it found.
+	int original_slot = get_active_boot_slot();
 
-	if (boot_control_check_slot_sanity(slot)) {
+	if (boot_control_check_slot_sanity(slot) || original_slot < 0) {
 		ALOGE("%s: Bad arguments", __func__);
 		goto error;
 	}
@@ -619,6 +633,7 @@ int set_active_boot_slot(unsigned slot)
 		if (boot_ctl_set_active_slot_for_partitions(map_iter->second,
 					slot)) {
 			ALOGE("%s: Failed to set active slot", __func__);
+			restore_active_slot(ptn_map, original_slot);
 			goto error;
 		}
 	}
@@ -639,15 +654,7 @@ int set_active_boot_slot(unsigned slot)
 		if (rc) {
 			ALOGE("%s: Failed to switch xbl boot partition",
 					__func__);
-			for (map_iter = ptn_map.begin(); map_iter != ptn_map.end(); map_iter++){
-				if (map_iter->second.size() < 1)
-					continue;
-				if (boot_ctl_set_active_slot_for_partitions(map_iter->second,
-						original_slot)) {
-					ALOGE("%s: Failed to set active slot", __func__);
-					goto error;
-				}
-			}
+			restore_active_slot(ptn_map, original_slot);
 			goto error;
 		}
 	}
