@@ -34,7 +34,8 @@ DiamaneOS changes are the commits on top.
   retry count. When the LUN write reports an error but the LUN already shows the
   new slot, the switch stays.
 - Before a new slot is marked successful, the service checks the boot LUN. When
-  the other slot is a working fallback, it reads the LUN, writes the same value
+  the other slot is a working fallback, which it is only during an update's
+  trial boot (merge status SNAPSHOTTED), it reads the LUN, writes the same value
   and reads it back. If that fails, the slot stays unmarked and the bootloader
   returns to the old build after its retries. Without a fallback it only reads
   and logs, since refusing would end in fastboot.

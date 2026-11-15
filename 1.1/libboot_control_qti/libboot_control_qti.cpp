@@ -641,10 +641,14 @@ int mark_boot_successful(){
 	// marked, a build that cannot set the boot LUN could become the only one
 	// that boots. So test the LUN path first, while the slot is still on trial.
 	// Only a working fallback makes a refusal useful, so only then does the
-	// test write the LUN. Without one it only reads.
+	// test write the LUN. Without one it only reads. The other slot is a
+	// fallback only during an update's trial boot: virtual A/B keeps its system
+	// until the merge, and its flags describe it. After a fresh install they
+	// can be stale while the slot holds no system.
 	if (gpt_utils_is_ufs_device() && is_slot_marked_successful(cur_slot) == 0) {
 		unsigned other_slot = cur_slot ? 0 : 1;
-		bool fallback = is_slot_marked_successful(other_slot) == 1 &&
+		bool fallback = get_snapshot_merge_status() == MergeStatus::SNAPSHOTTED &&
+				is_slot_marked_successful(other_slot) == 1 &&
 				is_slot_bootable(other_slot) == 1;
 
 		if (boot_lun_self_test(cur_slot, fallback)) {
