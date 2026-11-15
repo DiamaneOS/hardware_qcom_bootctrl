@@ -60,6 +60,7 @@
 
 #define SLOT_ACTIVE 1
 #define SLOT_INACTIVE 2
+#define BOOT_LUN_TEST_ATTEMPTS 3
 #define UPDATE_SLOT(pentry, guid, slot_state) ({ \
 		memcpy(pentry, guid, TYPE_GUID_SIZE); \
 		if (slot_state == SLOT_ACTIVE)\
@@ -85,6 +86,13 @@ using ::android::bootable::GetMiscVirtualAbMergeStatus;
 using ::android::bootable::InitMiscVirtualAbMessageIfNeeded;
 using ::android::bootable::SetMiscVirtualAbMergeStatus;
 using ::android::hardware::boot::V1_1::MergeStatus;
+
+// The attribute byte of one A/B partition entry in the primary and backup GPT.
+struct slot_attr {
+	string name;
+	uint8_t primary;
+	uint8_t backup;
+};
 
 //Get the value of one of the attribute fields for a partition.
 static int get_partition_attribute(char *partname,
@@ -261,7 +269,7 @@ static int boot_control_check_slot_sanity(unsigned slot)
 
 //Return a gpt disk structure representing the disk that holds
 //partition.
-static struct gpt_disk* boot_ctl_get_disk_info(char *partition)
+static struct gpt_disk* boot_ctl_get_disk_info(const char *partition)
 {
 	struct gpt_disk *disk = NULL;
 	if (!partition)
@@ -422,6 +430,139 @@ error:
 	return -1;
 }
 
+// Adds to @attrs the attribute bytes of both slots of each partition in
+// @part_list (names with the _a suffix) found on @disk.
+static void save_disk_attributes(struct gpt_disk *disk, const vector<string> &part_list,
+		vector<slot_attr> &attrs)
+{
+	for (const string &name : part_list) {
+		if (name.size() < strlen(AB_SLOT_A_SUFFIX) + 1)
+			continue;
+		string prefix = name.substr(0, name.size() - strlen(AB_SLOT_A_SUFFIX));
+		for (unsigned i = 0; slot_suffix_arr[i] != NULL; i++) {
+			string part = prefix + slot_suffix_arr[i];
+			uint8_t *pentry = gpt_disk_get_pentry(disk, part.c_str(), PRIMARY_GPT);
+			uint8_t *pentry_bak = gpt_disk_get_pentry(disk, part.c_str(),
+					SECONDARY_GPT);
+			if (!pentry || !pentry_bak)
+				continue;
+			attrs.push_back({part, pentry[AB_FLAG_OFFSET],
+					pentry_bak[AB_FLAG_OFFSET]});
+		}
+	}
+}
+
+// Writes the saved bytes in @attrs into @disk in memory and updates the CRCs.
+static int apply_disk_attributes(struct gpt_disk *disk, const vector<slot_attr> &attrs)
+{
+	for (const slot_attr &attr : attrs) {
+		uint8_t *pentry = gpt_disk_get_pentry(disk, attr.name.c_str(), PRIMARY_GPT);
+		uint8_t *pentry_bak = gpt_disk_get_pentry(disk, attr.name.c_str(),
+				SECONDARY_GPT);
+		if (!pentry || !pentry_bak) {
+			ALOGE("%s: Entry for %s not found", __func__, attr.name.c_str());
+			return -1;
+		}
+		pentry[AB_FLAG_OFFSET] = attr.primary;
+		pentry_bak[AB_FLAG_OFFSET] = attr.backup;
+	}
+	return gpt_disk_update_crc(disk);
+}
+
+// Saves the attribute bytes of both slots on every disk in @ptn_map before a
+// switch. Setting the old slot active again writes a fixed value, which would
+// clear its successful flag and reset its retry count.
+static int save_slot_attributes(map<string, vector<string>> &ptn_map,
+		map<string, vector<slot_attr>> &saved)
+{
+	for (auto &entry : ptn_map) {
+		if (entry.second.size() < 1)
+			continue;
+		struct gpt_disk *disk = boot_ctl_get_disk_info(entry.second[0].c_str());
+		if (!disk) {
+			ALOGE("%s: Failed to read the GPT on %s", __func__, entry.first.c_str());
+			return -1;
+		}
+		save_disk_attributes(disk, entry.second, saved[entry.first]);
+		gpt_disk_free(disk);
+	}
+	return 0;
+}
+
+// Writes the bytes saved by save_slot_attributes back to the disk that holds
+// @partition.
+static int restore_disk_attributes(const string &partition, const vector<slot_attr> &attrs)
+{
+	int rc = -1;
+	struct gpt_disk *disk = boot_ctl_get_disk_info(partition.c_str());
+
+	if (!disk)
+		return -1;
+	if (apply_disk_attributes(disk, attrs))
+		ALOGE("%s: Failed to update the GPT for %s", __func__, partition.c_str());
+	else if (gpt_disk_commit(disk))
+		ALOGE("%s: Failed to commit the GPT for %s", __func__, partition.c_str());
+	else
+		rc = 0;
+	gpt_disk_free(disk);
+	return rc;
+}
+
+// Boot chain of @slot: xbl_a is the normal chain and xbl_b the backup one.
+static int slot_boot_chain(unsigned slot, enum boot_chain *chain)
+{
+	if (!strncmp(slot_suffix_arr[slot], AB_SLOT_A_SUFFIX, strlen(AB_SLOT_A_SUFFIX))) {
+		*chain = NORMAL_BOOT;
+	} else if (!strncmp(slot_suffix_arr[slot], AB_SLOT_B_SUFFIX,
+				strlen(AB_SLOT_B_SUFFIX))) {
+		*chain = BACKUP_BOOT;
+	} else {
+		ALOGE("%s: Unknown slot suffix!", __func__);
+		return -1;
+	}
+	return 0;
+}
+
+// Reads the boot LUN, which must already point at @slot. With @write it also
+// writes the same value again and reads it back. Never writes the other slot's
+// value.
+static int boot_lun_self_test(unsigned slot, bool write)
+{
+	enum boot_chain chain = NORMAL_BOOT;
+	enum boot_chain lun = NORMAL_BOOT;
+
+	if (slot_boot_chain(slot, &chain))
+		return -1;
+	for (int attempt = 1; attempt <= BOOT_LUN_TEST_ATTEMPTS; attempt++) {
+		if (gpt_utils_get_xbl_boot_partition(&lun)) {
+			ALOGE("%s: Attempt %d: cannot read the boot LUN", __func__, attempt);
+			continue;
+		}
+		if (lun != chain) {
+			ALOGE("%s: Attempt %d: boot LUN does not point at slot %s", __func__,
+					attempt, slot_suffix_arr[slot]);
+			continue;
+		}
+		if (!write) {
+			ALOGI("%s: Boot LUN points at slot %s", __func__, slot_suffix_arr[slot]);
+			return 0;
+		}
+		if (gpt_utils_set_xbl_boot_partition(chain)) {
+			ALOGE("%s: Attempt %d: cannot write the boot LUN", __func__, attempt);
+			continue;
+		}
+		if (gpt_utils_get_xbl_boot_partition(&lun) || lun != chain) {
+			ALOGE("%s: Attempt %d: boot LUN read back wrong after the write",
+					__func__, attempt);
+			continue;
+		}
+		ALOGI("%s: Boot LUN for slot %s rewritten and read back", __func__,
+				slot_suffix_arr[slot]);
+		return 0;
+	}
+	return -1;
+}
+
 bool bootcontrol_init()
 {
 	char platform[256];
@@ -493,6 +634,36 @@ error:
 }
 
 int mark_boot_successful(){
+	unsigned cur_slot = get_current_slot();
+
+	// The bootloader refuses to boot when the boot LUN and the GPT active slot
+	// disagree, and a locked phone then stays in fastboot. Once this slot is
+	// marked, a build that cannot set the boot LUN could become the only one
+	// that boots. So test the LUN path first, while the slot is still on trial.
+	// Only a working fallback makes a refusal useful, so only then does the
+	// test write the LUN. Without one it only reads.
+	if (gpt_utils_is_ufs_device() && is_slot_marked_successful(cur_slot) == 0) {
+		unsigned other_slot = cur_slot ? 0 : 1;
+		bool fallback = is_slot_marked_successful(other_slot) == 1 &&
+				is_slot_bootable(other_slot) == 1;
+
+		if (boot_lun_self_test(cur_slot, fallback)) {
+			if (fallback) {
+				// The bootloader's retry fallback then returns to the other
+				// slot and sets the boot LUN itself.
+				ALOGE("%s: Boot LUN test failed, slot %s stays unmarked "
+						"to fall back to %s", __func__,
+						slot_suffix_arr[cur_slot],
+						slot_suffix_arr[other_slot]);
+				return -1;
+			}
+			// Refusing without a working fallback would end in fastboot.
+			ALOGE("%s: Boot LUN test failed and slot %s is no fallback, "
+					"marking %s anyway", __func__,
+					slot_suffix_arr[other_slot], slot_suffix_arr[cur_slot]);
+		}
+	}
+
 	if (mGvmqPlatform) {
 		std::string err;
 		std::string misc_blk_device = get_bootloader_message_blk_device(&err);
@@ -521,8 +692,6 @@ int mark_boot_successful(){
 				boot_verify.reserved[0],boot_verify.reserved[1], boot_verify.reserved[2]);
 	}
 
-	unsigned cur_slot = 0;
-	cur_slot = get_current_slot();
 	if (update_slot_attribute(slot_suffix_arr[cur_slot],
 				ATTR_BOOT_SUCCESSFUL)) {
 		goto error;
@@ -533,14 +702,23 @@ error:
 	return -1;
 }
 
-// Sets every disk back to @slot after a failed switch, as far as it can.
-static void restore_active_slot(map<string, vector<string>> &ptn_map, unsigned slot)
+// Sets every disk back to @slot after a failed switch, as far as it can, then
+// writes back the attribute bytes saved before the switch. So the old slot
+// keeps its successful flag and retry count.
+static void restore_active_slot(map<string, vector<string>> &ptn_map, unsigned slot,
+		map<string, vector<slot_attr>> &saved)
 {
 	for (auto &entry : ptn_map) {
 		if (entry.second.size() < 1)
 			continue;
-		if (boot_ctl_set_active_slot_for_partitions(entry.second, slot))
+		if (boot_ctl_set_active_slot_for_partitions(entry.second, slot)) {
 			ALOGE("%s: Failed to restore slot %u on %s", __func__, slot,
+					entry.first.c_str());
+			// The saved bytes would not match the type GUIDs left on this disk.
+			continue;
+		}
+		if (restore_disk_attributes(entry.second[0], saved[entry.first]))
+			ALOGE("%s: Failed to restore slot attributes on %s", __func__,
 					entry.first.c_str());
 	}
 }
@@ -589,11 +767,15 @@ int set_active_boot_slot(unsigned slot)
 	int rc = -1;
 	int is_ufs = gpt_utils_is_ufs_device();
 	map<string, vector<string>>::iterator map_iter;
+	map<string, vector<slot_attr>> saved_attrs;
+	enum boot_chain chain = NORMAL_BOOT;
+	enum boot_chain lun = NORMAL_BOOT;
 	// Not the booted slot: a pending update can already have moved the active
 	// slot, and a failed switch has to put back what it found.
 	int original_slot = get_active_boot_slot();
 
-	if (boot_control_check_slot_sanity(slot) || original_slot < 0) {
+	if (boot_control_check_slot_sanity(slot) || original_slot < 0 ||
+			slot_boot_chain(slot, &chain)) {
 		ALOGE("%s: Bad arguments", __func__);
 		goto error;
 	}
@@ -627,34 +809,37 @@ int set_active_boot_slot(unsigned slot)
 				__func__);
 		goto error;
 	}
+	if (save_slot_attributes(ptn_map, saved_attrs)) {
+		ALOGE("%s: Failed to save slot attributes", __func__);
+		goto error;
+	}
 	for (map_iter = ptn_map.begin(); map_iter != ptn_map.end(); map_iter++){
 		if (map_iter->second.size() < 1)
 			continue;
 		if (boot_ctl_set_active_slot_for_partitions(map_iter->second,
 					slot)) {
 			ALOGE("%s: Failed to set active slot", __func__);
-			restore_active_slot(ptn_map, original_slot);
+			restore_active_slot(ptn_map, original_slot, saved_attrs);
 			goto error;
 		}
 	}
 	if (is_ufs) {
-		if (!strncmp(slot_suffix_arr[slot], AB_SLOT_A_SUFFIX,
-					strlen(AB_SLOT_A_SUFFIX))){
-			//Set xbl_a as the boot lun
-			rc = gpt_utils_set_xbl_boot_partition(NORMAL_BOOT);
-		} else if (!strncmp(slot_suffix_arr[slot], AB_SLOT_B_SUFFIX,
-					strlen(AB_SLOT_B_SUFFIX))){
-			//Set xbl_b as the boot lun
-			rc = gpt_utils_set_xbl_boot_partition(BACKUP_BOOT);
-		} else {
-			//Something has gone terribly terribly wrong
-			ALOGE("%s: Unknown slot suffix!", __func__);
-			goto error;
-		}
+		//Set xbl_a or xbl_b as the boot lun
+		rc = gpt_utils_set_xbl_boot_partition(chain);
 		if (rc) {
 			ALOGE("%s: Failed to switch xbl boot partition",
 					__func__);
-			restore_active_slot(ptn_map, original_slot);
+			// The bootloader refuses to boot when the boot LUN and the GPT
+			// slot disagree. A write can fail after the device took the
+			// value, so check which slot the LUN shows before restoring.
+			if (!gpt_utils_get_xbl_boot_partition(&lun) && lun == chain) {
+				ALOGI("%s: Boot LUN shows slot %s after all, keeping the switch",
+						__func__, slot_suffix_arr[slot]);
+				return 0;
+			}
+			ALOGE("%s: Boot LUN not on slot %s, restoring slot %d", __func__,
+					slot_suffix_arr[slot], original_slot);
+			restore_active_slot(ptn_map, original_slot, saved_attrs);
 			goto error;
 		}
 	}
